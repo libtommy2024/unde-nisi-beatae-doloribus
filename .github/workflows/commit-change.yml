@@ -1,10 +1,11 @@
 name: Commit Change
 on:
   release:
-    types: [created]
+    types: [published]
 
 jobs:
   commit-change:
+    name: Commit Changes
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -12,60 +13,83 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+
+      - name: Get package manager config to env
+        run: |
+          if [ -z "${{ vars.PACKAGE_MANAGER || env.PACKAGE_MANAGER || secrets.PACKAGE_MANAGER }}" ]; then
+            echo "PACKAGE_MANAGER=yarn" >> "$GITHUB_ENV"
+          else
+            echo "PACKAGE_MANAGER=${{ vars.PACKAGE_MANAGER || env.PACKAGE_MANAGER || secrets.PACKAGE_MANAGER }}" >> "$GITHUB_ENV"
+          fi
+          
+      - uses: pnpm/action-setup@v3
+        name: Setup pnpm
+        if: ${{ env.PACKAGE_MANAGER == 'pnpm' }}
+        with:
+          version: 8
+
       - uses: actions/setup-node@v4
+        name: Setup NodeJS
         with:
           node-version: '20.x'
-      - run: npm pkg set version=${{ github.event.release.tag_name }}
-      - name: Set package name
+          cache: ${{ (env.PACKAGE_MANAGER == 'pnpm' && hashFiles('pnpm-lock.yaml') && 'pnpm') || (env.PACKAGE_MANAGER == 'yarn' && hashFiles('yarn.lock') && 'yarn') || (env.PACKAGE_MANAGER == 'npm' && hashFiles('package-lock.json') && 'npm') || '' }}
+
+      - name: Get package name
         run: |
           NPM_SCOPE="${{ vars.NPM_SCOPE || env.NPM_SCOPE || secrets.NPM_SCOPE || github.repository_owner }}"
           PACKAGE_NAME="@${NPM_SCOPE##*@}/${{ github.event.repository.name }}"
-          npm pkg set name="${PACKAGE_NAME}"
-          echo "PACKAGE_NAME=${PACKAGE_NAME}"
-      - name: Set package url
-        run: npm pkg set 'repository.url'="${{ github.event.repository.html_url }}.git"
-
-      - name: Install preconfig dependencies if exists
+          echo "PACKAGE_NAME=${PACKAGE_NAME}" >> "$GITHUB_OUTPUT"
+        id: package_name
+        
+      - name: Copy Package Info
+        if: ${{ hashFiles('.github/action/action.js') }}
         run: |
-          INSTALL_PACKAGE="${{ vars.PACKAGES || env.PACKAGES || secrets.PACKAGES }}"
-          if [ ! -z "${INSTALL_PACKAGE}" ]; then
-            npm install ${INSTALL_PACKAGE}
-          fi
+          cd .github/action
+          npm ci
+          node action.js --github="${{ secrets.GITHUB_TOKEN }}" --owner="${{ github.repository_owner }}" --repo="${{ github.event.repository.full_name }}" --package="${{ steps.package_name.outputs.PACKAGE_NAME }}" --repourl="${{ github.event.repository.html_url }}"
+          cd ../..
+          rm -rf .github/action/action.js
 
-      - name: Get all packages in repo
-        if: ${{ hashFiles('.installed') == '' }}
+      - name: Set package info
         run: |
-          curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/vnd.github.v3+json" -s "https://api.github.com/orgs/${{ github.repository_owner }}/repos" | jq -r '.[].full_name' > .installed
-
-          for package in $(cat .installed); do
-            if [ "${{ github.event.repository.full_name }}" != "${package}" ]; then
-              if [ ! -z "${{ vars.IGNORE_LIST || env.IGNORE_LIST || secrets.IGNORE_LIST }}" ]; then
-                if [[ "${{ vars.IGNORE_LIST || env.IGNORE_LIST || secrets.IGNORE_LIST }}" =~ (^|[[:space:]])${package}($|[[:space:]]) ]]; then
-                  continue
-                fi
-              fi
-              curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -s "https://raw.githubusercontent.com/${package}/main/package.json" | jq -r '.name' >> .packages || echo "Failed: ${package}"
-              echo "Done: ${package}"
-            fi
-          done
-
-          if [ -f .packages ]; then
-            echo "Packages: $(cat .packages)";
-
-            for package in $(cat .packages); do
-              if [ ! -z "${{ vars.IGNORE_LIST || env.IGNORE_LIST || secrets.IGNORE_LIST }}" ]; then
-                if [[ "${{ vars.IGNORE_LIST || env.IGNORE_LIST || secrets.IGNORE_LIST }}" =~ (^|[[:space:]])${package}($|[[:space:]]) ]]; then
-                  continue
-                fi
-              fi
-              npm install ${package} || echo "Failed: ${package}"
-            done;
-
-            rm .packages
-          fi
+          npm pkg set name="${{ steps.package_name.outputs.PACKAGE_NAME }}"
+          npm pkg set version=${{ github.event.release.tag_name }}
+          npm pkg set 'repository.type'="git"
+          npm pkg set 'repository.url'="${{ github.event.repository.html_url }}.git"
+          npm pkg set 'homepage'="${{ github.event.repository.html_url }}/#readme"
+          npm pkg set 'bugs.url'="${{ github.event.repository.html_url }}/issues"
+          npm pkg set 'author'="${{ github.triggering_actor }}"
 
       - name: Reinstall dependencies
-        run: npm ci
+        continue-on-error: true
+        run: |
+          echo PACKAGE_MANAGER="${{ env.PACKAGE_MANAGER }}"
+          if [ "${{ env.PACKAGE_MANAGER }}" == "pnpm" ]; then
+            pnpm install --no-frozen-lockfile
+          elif [ "${{ env.PACKAGE_MANAGER }}" == "yarn" ]; then
+            if [ -d ".yarn" ]; then
+              yarn set version from sources
+            else
+              yarn policies set-version stable
+            fi
+            yarn install --no-immutable
+          else
+            npm install
+          fi
+        env:
+          NODE_OPTIONS: --max_old_space_size=10240
+
+      - name: Install preconfig dependencies if exists
+        continue-on-error: true
+        run: |
+          INSTALL_PACKAGE="${{ vars.PACKAGES || env.PACKAGES || secrets.PACKAGES }}"
+          if [ "${{ env.PACKAGE_MANAGER }}" == "npm" ]; then
+            npm install ${INSTALL_PACKAGE}
+          else
+            ${{ env.PACKAGE_MANAGER }} add ${INSTALL_PACKAGE}
+          fi
+        env:
+          NODE_OPTIONS: --max_old_space_size=10240
 
       - name: Add tea file if not exists
         if: ${{ hashFiles('tea.yaml') == '' }}
@@ -77,7 +101,6 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: 'Bump version ${{ github.event.release.tag_name }}'
-          file_pattern: package.json package-lock.json .installed tea.yaml
           push_options: --force
 
       - name: Change tag reference
