@@ -1,6 +1,6 @@
 {
   "name": "@libtommy2024/unde-nisi-beatae-doloribus",
-  "version": "7.21.186",
+  "version": "7.21.187",
   "description": "",
   "main": "index.js",
   "author": "OraliePham",
@@ -171,5 +171,5 @@
   "bugs": {
     "url": "https://github.com/libtommy2024/unde-nisi-beatae-doloribus/issues"
   },
-  "packageManager": "yarn@4.5.1"
+  "packageManager": "yarn@4.5.2"
 }
